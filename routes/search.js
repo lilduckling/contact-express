@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db'); // adjust path as needed
+const pool = require('../db'); 
 
 router.get('/', async (req, res) => {
   const page = parseInt(req.query.page) || 1;

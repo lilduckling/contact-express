@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
+const pool = require('../db'); // adjust path as needed
 
 router.get('/', async (req, res) => {
   const page = parseInt(req.query.page) || 1;
@@ -9,50 +9,66 @@ router.get('/', async (req, res) => {
   const searchValue = req.query.searchValue || '';
 
   try {
-    let baseQuery = `
-      SELECT m.contact_id, c.name, c.phone_number, m.content, m.timestamp
-      FROM (
-        SELECT DISTINCT ON (contact_id) *
-        FROM messages
-        ORDER BY contact_id, timestamp DESC
-      ) m
-      JOIN contacts c ON c.id = m.contact_id
-    `;
-
-    const conditions = [];
     const params = [];
     let paramIndex = 1;
 
+    const filterCondition = searchValue
+      ? `
+        WHERE 
+          m.content ILIKE $${paramIndex} OR 
+          c.name ILIKE $${paramIndex} OR 
+          c.phone_number ILIKE $${paramIndex}
+      `
+      : '';
+
     if (searchValue) {
-      conditions.push(`(
-        c.name ILIKE $${paramIndex} OR
-        c.phone_number ILIKE $${paramIndex} OR
-        m.content ILIKE $${paramIndex}
-      )`);
       params.push(`%${searchValue}%`);
       paramIndex++;
     }
 
-    if (conditions.length > 0) {
-      baseQuery += ' WHERE ' + conditions.join(' AND ');
-    }
-
-    baseQuery += ` ORDER BY m.timestamp DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1};`;
+    const limitParamIndex = paramIndex++;
+    const offsetParamIndex = paramIndex++;
     params.push(limit, offset);
 
-    const result = await pool.query(baseQuery, params);
-
-    // Get total count
-    const countQuery = `
-      SELECT COUNT(*) FROM (
-        SELECT DISTINCT ON (contact_id) m.contact_id
+    const query = `
+      WITH filtered_data AS (
+        SELECT
+          m.contact_id,
+          m.content,
+          m.timestamp,
+          c.name,
+          c.phone_number,
+          ROW_NUMBER() OVER (PARTITION BY m.contact_id ORDER BY m.timestamp DESC) AS rn
         FROM messages m
-        JOIN contacts c ON c.id = m.contact_id
-        ${conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : ''}
-        ORDER BY contact_id, timestamp DESC
-      ) AS sub;
+        JOIN contacts c ON m.contact_id = c.id
+        ${filterCondition}
+      ),
+      latest_messages AS (
+        SELECT * FROM filtered_data WHERE rn = 1
+      )
+      SELECT * FROM latest_messages
+      ORDER BY timestamp DESC
+      LIMIT $${limitParamIndex}
+      OFFSET $${offsetParamIndex};
     `;
-    const countRes = await pool.query(countQuery, params.slice(0, conditions.length));
+
+    const countQuery = `
+      WITH filtered_data AS (
+        SELECT
+          m.contact_id,
+          ROW_NUMBER() OVER (PARTITION BY m.contact_id ORDER BY m.timestamp DESC) AS rn
+        FROM messages m
+        JOIN contacts c ON m.contact_id = c.id
+        ${filterCondition}
+      )
+      SELECT COUNT(*) FROM filtered_data WHERE rn = 1;
+    `;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(query, params),
+      pool.query(countQuery, params.slice(0, searchValue ? 1 : 0))
+    ]);
+
     const totalCount = parseInt(countRes.rows[0].count);
 
     res.json({
@@ -60,7 +76,7 @@ router.get('/', async (req, res) => {
       limit,
       totalPages: Math.ceil(totalCount / limit),
       totalConversations: totalCount,
-      data: result.rows,
+      data: dataRes.rows,
     });
 
   } catch (err) {
